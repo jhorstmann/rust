@@ -1116,11 +1116,11 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         let i_xn_msb = bx.lshr(i_xn, bx.const_vector(shift_indices.as_slice()));
         // Truncate vector to an <i1 x N>
         let i1xn = bx.trunc(i_xn_msb, bx.type_vector(bx.type_i1(), in_len));
-        // Bitcast <i1 x N> to iN:
-        let i_ = bx.bitcast(i1xn, bx.type_ix(in_len));
 
         match ret_ty.kind() {
             ty::Uint(i) if i.bit_width() == Some(expected_int_bits) => {
+                // Bitcast <i1 x N> to iN:
+                let i_ = bx.bitcast(i1xn, bx.type_ix(in_len));
                 // Zero-extend iN to the bitmask type:
                 return Ok(bx.zext(i_, bx.type_ix(expected_int_bits)));
             }
@@ -1130,14 +1130,44 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
                         == Some(expected_bytes) =>
             {
                 // Zero-extend iN to the array length:
-                let ze = bx.zext(i_, bx.type_ix(expected_bytes * 8));
+                // let integer_type = bx.type_ix(expected_bytes * 8);
+                // let ze = bx.zext(i_, integer_type);
 
+                // extract chunks of 8 bit from the mask and insert each as a byte in the array
+                let byte_type = bx.type_ix(8);
+                let mut array = bx.const_undef(bx.type_array(byte_type, expected_bytes));
+                for byte in 0..expected_bytes {
+                    let shuffle = (0..8).map(|bit| {
+                        let bit = byte * 8 + bit;
+                        if bit < in_len {
+                            bx.cx.const_int(bx.type_ix(32), (bit) as _)
+                        } else {
+                            bx.const_undef(bx.type_ix(32))
+                        }
+                    }).collect::<Vec<_>>();
+                    let bv = bx.shuffle_vector(i1xn, bx.const_undef(bx.type_vector(bx.type_ix(1), in_len)), bx.const_vector( shuffle.as_slice()));
+                    let bi = bx.bitcast(bv, byte_type);
+                    array = bx.insert_value(array, bi, byte as _);
+                }
+/*
                 // Convert the integer to a byte array
-                let ptr = bx.alloca(bx.type_ix(expected_bytes * 8), Align::ONE);
-                bx.store(ze, ptr, Align::ONE);
+                let align = Align::ONE;
                 let array_ty = bx.type_array(bx.type_i8(), expected_bytes);
-                let ptr = bx.pointercast(ptr, bx.cx.type_ptr_to(array_ty));
-                return Ok(bx.load(array_ty, ptr, Align::ONE));
+                let array_ptr = bx.alloca(array_ty, align);
+                let int_ptr = bx.alloca(integer_type, align);
+
+                bx.store(ze, int_ptr, align);
+
+                let src = bx.pointercast(int_ptr, bx.cx.type_ptr_to(bx.type_i8()));
+                let dst = bx.pointercast(array_ptr, bx.cx.type_ptr_to(bx.type_i8()));
+                bx.memcpy(dst, align, src, align, bx.const_u64(expected_bytes), MemFlags::empty());
+                // bx.memset(dst, bx.const_u8(42), bx.const_u64(expected_bytes), align, MemFlags::empty());
+
+                // let int_ptr = bx.pointercast(array_ptr, bx.cx.type_ptr_to(integer_type));
+                return Ok(bx.load(array_ty, array_ptr, align));
+
+ */
+                return Ok(array)
             }
             _ => return_error!(
                 "cannot return `{}`, expected `u{}` or `[u8; {}]`",
